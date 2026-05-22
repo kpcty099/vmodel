@@ -34,11 +34,21 @@ class AgentService : Service() {
     private val transcriptBuilder = StringBuilder()
     private val currentPhoneNumber = "+919876543210" // Default/Test Indian number
 
+    private var beepJob: Job? = null
+    private var toneGenerator: android.media.ToneGenerator? = null
+
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "AgentService onCreate called")
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification("Dograh Voice Agent Active"))
+
+        // Initialize ToneGenerator for Indian regulatory compliance (audible beep every 15s)
+        try {
+            toneGenerator = android.media.ToneGenerator(android.media.AudioManager.STREAM_VOICE_CALL, 80)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to create ToneGenerator: ${e.message}")
+        }
 
         // Initialize all subsystems
         sipManager = SipManager(this)
@@ -87,12 +97,6 @@ class AgentService : Service() {
 
         // Start listening to inbound calls or trigger outbound triggers
         serviceScope.launch {
-            // Main processing loop:
-            // 1. Observe: Stream audio from phone microphone or SIP network packets
-            // 2. Transcribe using WhisperEngine
-            // 3. Process transcription with LlamaEngine (Think & Decides next actions)
-            // 4. Act: trigger TTS responses or DTMF tones
-            
             whisperEngine.startStreaming { partialText ->
                 if (partialText.isNotBlank()) {
                     Log.d(TAG, "Transcribed: $partialText")
@@ -106,8 +110,32 @@ class AgentService : Service() {
     private fun stopAgentLoop() {
         isRunning = false
         whisperEngine.stopStreaming()
+        stopBeepTimer()
         Log.d(TAG, "Autonomous Agent Loop stopped.")
         stopSelf()
+    }
+
+    private fun startBeepTimer() {
+        stopBeepTimer() // Safeguard
+        beepJob = serviceScope.launch {
+            while (isActive && currentCallActive) {
+                delay(15000) // Delay first so the user gets the consent warning in peace
+                if (currentCallActive) {
+                    try {
+                        // Play compliance beep tone to notify of call recording in India
+                        toneGenerator?.startTone(android.media.ToneGenerator.TONE_PROP_BEEP, 150)
+                        Log.d(TAG, "Compliance recording beep tone played.")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error playing beep tone: ${e.message}")
+                    }
+                }
+            }
+        }
+    }
+
+    private fun stopBeepTimer() {
+        beepJob?.cancel()
+        beepJob = null
     }
 
     private fun placeCall(phoneNumber: String) {
@@ -119,17 +147,21 @@ class AgentService : Service() {
             Log.d(TAG, "Placing autonomous outbound call to $phoneNumber...")
             sipManager.placeCall(phoneNumber)
             
-            // Introduce the agent once the call is connected
+            // Start compliance recording notifier beep tone
+            startBeepTimer()
+
+            // Present audible recording notification consent on connection
             delay(1000) // Mock wait for connection
-            val greeting = "Namaste. I am an automated assistant calling regarding your car insurance renewal. May I know if I am speaking with the policy holder?"
-            speak(greeting)
-            transcriptBuilder.append("Agent: ").append(greeting).append("\n")
+            val consentWarning = "Namaste. Yeh call ek automatic voice agent dwara record ki ja rahi hai. Kya hum aage baat kar sakte hain? This call is being recorded by an automated voice assistant. Do you consent to proceed?"
+            speak(consentWarning)
+            transcriptBuilder.append("Agent: ").append(consentWarning).append("\n")
         }
     }
 
     private fun hangupCall() {
         if (!currentCallActive) return
         currentCallActive = false
+        stopBeepTimer()
         Log.d(TAG, "Hanging up call...")
         sipManager.hangup()
 
