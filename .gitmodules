@@ -1,0 +1,15 @@
+[submodule "mobile/pjsip"]
+	path = mobile/pjsip
+	url = https://github.com/pjsip/pjproject.git
+[submodule "mobile/whisper.cpp"]
+	path = mobile/whisper.cpp
+	url = https://github.com/ggerganov/whisper.cpp.git
+[submodule "mobile/llama.cpp"]
+	path = mobile/llama.cpp
+	url = https://github.com/ggerganov/llama.cpp.git
+[submodule "mobile/piper"]
+	path = mobile/piper
+	url = https://github.com/rhasspy/piper.git
+[submodule "mobile/sqlite-vec"]
+	path = mobile/sqlite-vec
+	url = https://github.com/asg017/sqlite-vec.git
