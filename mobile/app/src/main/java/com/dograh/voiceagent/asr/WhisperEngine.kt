@@ -112,6 +112,26 @@ class WhisperEngine(private val context: Context) {
     }
 
     /**
+     * Transcribes a given static buffer of raw 16kHz 16-bit PCM.
+     * @param pcm raw samples
+     * @return transcribed text
+     */
+    fun transcribeBuffer(pcm: ShortArray): String {
+        if (pcm.isEmpty()) return ""
+        val success = nativeFeed(pcm, pcm.size)
+        if (success) {
+            val jsonResult = nativeResult()
+            try {
+                val json = org.json.JSONObject(jsonResult)
+                return json.optString("text", "").trim()
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to parse result JSON: ${e.message}")
+            }
+        }
+        return ""
+    }
+
+    /**
      * Release all native resources.
      */
     fun release() {

@@ -6,17 +6,27 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioManager
+import android.media.AudioRecord
+import android.media.AudioTrack
+import android.media.MediaRecorder
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.dograh.voiceagent.asr.WhisperEngine
+import com.dograh.voiceagent.asr.VadEngine
 import com.dograh.voiceagent.llm.LlamaEngine
+import com.dograh.voiceagent.llm.PromptRouter
+import com.dograh.voiceagent.llm.DetectedLanguage
 import com.dograh.voiceagent.memory.CallMemory
 import com.dograh.voiceagent.sip.SipManager
 import com.dograh.voiceagent.tts.PiperEngine
 import kotlinx.coroutines.*
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 
 class AgentService : Service() {
 
@@ -28,14 +38,28 @@ class AgentService : Service() {
     private lateinit var piperEngine: PiperEngine
     private lateinit var llamaEngine: LlamaEngine
     private lateinit var callMemory: CallMemory
+    private lateinit var vadEngine: VadEngine
+    private lateinit var callStateMachine: CallStateMachine
+    private lateinit var promptRouter: PromptRouter
 
     private var isRunning = false
     private var currentCallActive = false
     private val transcriptBuilder = StringBuilder()
-    private val currentPhoneNumber = "+919876543210" // Default/Test Indian number
+    private var currentPhoneNumber = "+919876543210" // Default/Test Indian number
 
     private var beepJob: Job? = null
     private var toneGenerator: android.media.ToneGenerator? = null
+
+    // Audio Track variables for TTS Playback and Interruption
+    private var ttsAudioTrack: AudioTrack? = null
+    private var isTtsSpeaking = false
+    private var ttsSpeakingJob: Job? = null
+
+    // Audio Record variables for VAD-gated ASR input
+    private var isAudioRecording = false
+    private var audioRecordJob: Job? = null
+    private val accumulatedAudio = mutableListOf<Short>()
+    private var isSpeechActive = false
 
     override fun onCreate() {
         super.onCreate()
@@ -56,6 +80,12 @@ class AgentService : Service() {
         piperEngine = PiperEngine(this)
         llamaEngine = LlamaEngine(this)
         callMemory = CallMemory(this)
+        vadEngine = VadEngine()
+        callStateMachine = CallStateMachine()
+        promptRouter = PromptRouter()
+
+        initAudioTrack()
+        setupVadCallbacks()
 
         // Load models asynchronously in service scope
         serviceScope.launch {
@@ -65,7 +95,7 @@ class AgentService : Service() {
                 whisperEngine.initModel(whisperModelPath)
 
                 // Initialize Llama model
-                val llamaModelPath = filesDir.absolutePath + "/models/llama-3-8b-q4.gguf"
+                val llamaModelPath = filesDir.absolutePath + "/models/qwen-1_5b-instruct-q4.gguf"
                 llamaEngine.initModel(llamaModelPath)
 
                 Log.d(TAG, "All local voice and LLM models loaded successfully")
@@ -94,23 +124,14 @@ class AgentService : Service() {
         if (isRunning) return
         isRunning = true
         Log.d(TAG, "Autonomous Agent Loop started.")
-
-        // Start listening to inbound calls or trigger outbound triggers
-        serviceScope.launch {
-            whisperEngine.startStreaming { partialText ->
-                if (partialText.isNotBlank()) {
-                    Log.d(TAG, "Transcribed: $partialText")
-                    transcriptBuilder.append("User: ").append(partialText).append("\n")
-                    processDialogueTurn(partialText)
-                }
-            }
-        }
+        startAudioCapture()
     }
 
     private fun stopAgentLoop() {
         isRunning = false
-        whisperEngine.stopStreaming()
+        stopAudioCapture()
         stopBeepTimer()
+        stopSpeaking()
         Log.d(TAG, "Autonomous Agent Loop stopped.")
         stopSelf()
     }
@@ -119,7 +140,7 @@ class AgentService : Service() {
         stopBeepTimer() // Safeguard
         beepJob = serviceScope.launch {
             while (isActive && currentCallActive) {
-                delay(15000) // Delay first so the user gets the consent warning in peace
+                delay(15000) // Delay 15s to respect conversational cadence
                 if (currentCallActive) {
                     try {
                         // Play compliance beep tone to notify of call recording in India
@@ -141,7 +162,9 @@ class AgentService : Service() {
     private fun placeCall(phoneNumber: String) {
         if (currentCallActive) return
         currentCallActive = true
+        currentPhoneNumber = phoneNumber
         transcriptBuilder.clear()
+        callStateMachine.reset()
         
         serviceScope.launch {
             Log.d(TAG, "Placing autonomous outbound call to $phoneNumber...")
@@ -155,6 +178,9 @@ class AgentService : Service() {
             val consentWarning = "Namaste. Yeh call ek automatic voice agent dwara record ki ja rahi hai. Kya hum aage baat kar sakte hain? This call is being recorded by an automated voice assistant. Do you consent to proceed?"
             speak(consentWarning)
             transcriptBuilder.append("Agent: ").append(consentWarning).append("\n")
+            
+            // Explicitly force state machine into Consent tracking mode
+            callStateMachine.forceTransition(CallState.CONSENT)
         }
     }
 
@@ -162,49 +188,258 @@ class AgentService : Service() {
         if (!currentCallActive) return
         currentCallActive = false
         stopBeepTimer()
+        stopSpeaking()
         Log.d(TAG, "Hanging up call...")
         sipManager.hangup()
 
         // Post-call summary and storage in vector memory
         serviceScope.launch {
             val transcript = transcriptBuilder.toString()
-            val prompt = """
-                You are a post-call analyst. Read the transcript and generate a brief summary of the conversation.
-                Transcript:
-                $transcript
-            """.trimIndent()
-            
-            val summary = llamaEngine.generate(prompt)
-            Log.d(TAG, "Post-call summary generated: $summary")
+            if (transcript.isNotBlank()) {
+                val prompt = """
+                    You are a post-call analyst. Read the transcript and generate a brief summary of the conversation.
+                    Transcript:
+                    $transcript
+                """.trimIndent()
+                
+                val summary = llamaEngine.generate(prompt)
+                Log.d(TAG, "Post-call summary generated: $summary")
 
-            // Create a mock embedding for vector store (in real case, we use a SentenceTransformer model)
-            val mockEmbedding = FloatArray(384) { 0.1f } 
-            callMemory.saveCallRecord(currentPhoneNumber, "outbound", transcript, summary, mockEmbedding)
+                // Create a mock embedding for vector store (in real case, we use a SentenceTransformer model)
+                val mockEmbedding = FloatArray(384) { 0.1f } 
+                callMemory.saveCallRecord(currentPhoneNumber, "outbound", transcript, summary, mockEmbedding)
+            }
         }
     }
 
-    private fun processDialogueTurn(userText: String) {
+    // ==========================================
+    // CANCELLABLE SPEECH PLAYBACK & INTERRUPTION
+    // ==========================================
+
+    private fun initAudioTrack() {
+        try {
+            val sampleRate = 16000
+            val channelConfig = AudioFormat.CHANNEL_OUT_MONO
+            val audioFormat = AudioFormat.ENCODING_PCM_16BIT
+            val bufferSize = AudioTrack.getMinBufferSize(sampleRate, channelConfig, audioFormat)
+            
+            ttsAudioTrack = AudioTrack.Builder()
+                .setAudioAttributes(AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build())
+                .setAudioFormat(AudioFormat.Builder()
+                    .setEncoding(audioFormat)
+                    .setSampleRate(sampleRate)
+                    .setChannelMask(channelConfig)
+                    .build())
+                .setBufferSizeInBytes(bufferSize)
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .build()
+                
+            ttsAudioTrack?.play()
+            Log.d(TAG, "TTS AudioTrack initialized successfully")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to initialize AudioTrack: ${e.message}")
+        }
+    }
+
+    private fun speak(text: String) {
+        if (text.isBlank()) return
+        stopSpeaking() // Terminate current playback first
+
+        ttsSpeakingJob = serviceScope.launch(Dispatchers.Default) {
+            isTtsSpeaking = true
+            val pcmAudio = piperEngine.synthesize(text)
+            if (pcmAudio != null && isActive && isTtsSpeaking) {
+                Log.d(TAG, "Playing synthesized speech chunk of size ${pcmAudio.size} samples")
+                
+                // Write in chunks to allow fine-grained interruption check
+                val chunkSize = 3200 // ~200ms blocks
+                var offset = 0
+                while (isActive && isTtsSpeaking && offset < pcmAudio.size) {
+                    val writeSize = minOf(chunkSize, pcmAudio.size - offset)
+                    ttsAudioTrack?.write(pcmAudio, offset, writeSize)
+                    offset += writeSize
+                }
+            }
+            isTtsSpeaking = false
+        }
+    }
+
+    private fun stopSpeaking() {
+        isTtsSpeaking = false
+        ttsSpeakingJob?.cancel()
+        ttsSpeakingJob = null
+        try {
+            ttsAudioTrack?.stop()
+            ttsAudioTrack?.flush()
+            ttsAudioTrack?.play() // Re-prime for subsequent play
+            Log.d(TAG, "TTS interrupted and AudioTrack flushed")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error flushing AudioTrack: ${e.message}")
+        }
+    }
+
+    // ==========================================
+    // AUDIO RECORDING AND VAD PIPELINE
+    // ==========================================
+
+    @android.annotation.SuppressLint("MissingPermission")
+    private fun startAudioCapture() {
+        if (isAudioRecording) return
+        isAudioRecording = true
+        vadEngine.reset()
+
+        audioRecordJob = serviceScope.launch(Dispatchers.Default) {
+            val sampleRate = 16000
+            val channelConfig = AudioFormat.CHANNEL_IN_MONO
+            val audioFormat = AudioFormat.ENCODING_PCM_16BIT
+            // 30ms frames of audio is ideal for WebRTC and custom VAD gating: 16000 * 0.03 = 480 samples
+            val frameSize = 480 
+            val bufferSize = maxOf(
+                AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat),
+                frameSize * 4
+            )
+
+            val audioRecord = AudioRecord(
+                MediaRecorder.AudioSource.MIC,
+                sampleRate,
+                channelConfig,
+                audioFormat,
+                bufferSize
+            )
+
+            if (audioRecord.state != AudioRecord.STATE_INITIALIZED) {
+                Log.e(TAG, "Failed to initialize AudioRecord for agent service")
+                isAudioRecording = false
+                return@launch
+            }
+
+            audioRecord.startRecording()
+            val audioFrame = ShortArray(frameSize)
+            Log.d(TAG, "Microphone capture loop initialized.")
+
+            while (isActive && isAudioRecording) {
+                val readSamples = audioRecord.read(audioFrame, 0, frameSize)
+                if (readSamples > 0) {
+                    val actualFrame = ShortArray(readSamples)
+                    System.arraycopy(audioFrame, 0, actualFrame, 0, readSamples)
+
+                    // Process through VAD Engine
+                    val speechActive = vadEngine.processFrame(actualFrame)
+                    
+                    if (speechActive) {
+                        synchronized(accumulatedAudio) {
+                            accumulatedAudio.addAll(actualFrame.toList())
+                        }
+                    }
+                }
+            }
+
+            audioRecord.stop()
+            audioRecord.release()
+            Log.d(TAG, "Microphone capture loop terminated.")
+        }
+    }
+
+    private fun stopAudioCapture() {
+        isAudioRecording = false
+        audioRecordJob?.cancel()
+        audioRecordJob = null
+    }
+
+    private fun setupVadCallbacks() {
+        vadEngine.setListener(object : VadEngine.VadListener {
+            override fun onSpeechStarted() {
+                // Active user speech detected: perform duplex voice interruption
+                if (isTtsSpeaking) {
+                    Log.i(TAG, "User started speaking while TTS is active. Executing instant duplex interruption.")
+                    stopSpeaking()
+                }
+                isSpeechActive = true
+                synchronized(accumulatedAudio) {
+                    accumulatedAudio.clear()
+                }
+            }
+
+            override fun onSpeechStopped() {
+                isSpeechActive = false
+                Log.i(TAG, "User stopped speaking. Processing speech input...")
+                processSpeechInput()
+            }
+        })
+    }
+
+    private fun processSpeechInput() {
+        val audioSamples: ShortArray
+        synchronized(accumulatedAudio) {
+            audioSamples = accumulatedAudio.toShortArray()
+            accumulatedAudio.clear()
+        }
+
+        if (audioSamples.isEmpty()) return
+
+        serviceScope.launch(Dispatchers.Default) {
+            // Retrieve transcription using event-driven on-device ASR buffer execution
+            val userText = whisperEngine.transcribeBuffer(audioSamples)
+            if (userText.isNotBlank()) {
+                Log.d(TAG, "Final user transcription: $userText")
+                transcriptBuilder.append("User: ").append(userText).append("\n")
+                
+                // Enforce compliance and state machine logical routing
+                val stateChanged = callStateMachine.processInput(userText)
+                
+                when (callStateMachine.currentState) {
+                    CallState.CONSENT -> handleConsentState(userText)
+                    CallState.DIALOGUE -> handleDialogueState(userText)
+                    CallState.ESCALATION -> handleEscalationState()
+                    CallState.HANGUP -> handleHangupState()
+                    CallState.GREETING -> { /* Handled on connection */ }
+                }
+            }
+        }
+    }
+
+    // ==========================================
+    // DIALOGUE FLOWS & COMPLIANCE ENFORCEMENT
+    // ==========================================
+
+    private fun handleConsentState(userText: String) {
+        // If we are still in CONSENT state, user did not provide clear yes/no. Ask again.
+        val consentReminder = "Kripya spasht roop se kahein, kya aap aage baat karna chahte hain? Please state clearly if you consent to proceed with this recorded automated call."
+        speak(consentReminder)
+        transcriptBuilder.append("Agent (Reminder): ").append(consentReminder).append("\n")
+    }
+
+    private fun handleDialogueState(userText: String) {
         serviceScope.launch {
-            // Retrieve local vector memory of past call details to inject context (RAG)
+            // 1. Dynamic Lang preference detection
+            val detectedLang = promptRouter.detectLanguage(userText)
+            
+            // 2. Vector Store memory query (local SQLite-Vec)
             val mockQueryEmbedding = FloatArray(384) { 0.1f }
             val relevantHistory = callMemory.queryCallMemory(mockQueryEmbedding, limit = 2)
             val historyContext = relevantHistory.joinToString("\n") { "Past call summary: ${it.summary}" }
 
-            val prompt = """
-                You are an autonomous mobile call assistant.
-                Local context from past interactions:
-                $historyContext
-                
+            // 3. Prompt selection optimized for lightweight instruction-following model (e.g. Qwen/Gemma)
+            val systemPrompt = promptRouter.getSystemPrompt(detectedLang, historyContext)
+            
+            // Use Qwen/Gemma-optimized chat template structure for perfect formatting
+            val formattedPrompt = """
+                <|im_start|>system
+                $systemPrompt
+                <|im_end|>
+                <|im_start|>user
                 Conversation transcript so far:
                 ${transcriptBuilder.toString()}
                 
-                Generate a response. Return a JSON object with:
-                - "reply": The text to speak back to the user.
-                - "action": Any action to perform, e.g., "hangup", "dtmf", "hold", or "none".
-                - "dtmf_tones": Tones to send if action is dtmf.
+                User says: $userText
+                <|im_end|>
+                <|im_start|>assistant
             """.trimIndent()
 
-            val jsonResponseStr = llamaEngine.generate(prompt)
+            val jsonResponseStr = llamaEngine.generate(formattedPrompt)
             try {
                 val json = JSONObject(jsonResponseStr)
                 val reply = json.optString("reply", "")
@@ -216,38 +451,75 @@ class AgentService : Service() {
                 }
 
                 when (action) {
-                    "hangup" -> hangupCall()
+                    "hangup" -> {
+                        delay(2000) // Let final speech play out before hanging up
+                        hangupCall()
+                    }
                     "dtmf" -> {
                         val tones = json.optString("dtmf_tones", "")
-                        sipManager.register(tones, "") // Send DTMF
+                        sipManager.register(tones, "") // Transmit DTMF
                     }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to parse dialogue decision JSON: ${e.message}")
-                // Fallback direct response
-                val fallbackReply = "Aapki aawaz theek se nahi aa rahi hai, kripya dobara kahein."
+                val fallbackReply = "Aapki aawaz theek se nahi aa rahi hai. Kripya dobara kahein."
                 speak(fallbackReply)
                 transcriptBuilder.append("Agent: ").append(fallbackReply).append("\n")
             }
         }
     }
 
-    private fun speak(text: String) {
-        val pcmAudio = piperEngine.synthesize(text)
-        if (pcmAudio != null) {
-            // Feed synthesized audio buffer directly to the SIP stack/network stream
-            Log.d(TAG, "TTS Speech generated: ${pcmAudio.size} bytes. Streaming to caller.")
+    private fun handleEscalationState() {
+        serviceScope.launch {
+            val transferMessage = "Aapka call senior executive ko transfer kiya ja raha hai. Kripya line par bane rahein. Transferring your call to a representative, please hold."
+            speak(transferMessage)
+            transcriptBuilder.append("Agent: ").append(transferMessage).append("\n")
+            
+            // Wait for speaking to start and stream
+            delay(4000)
+            
+            // Execute actual SIP transfer protocol
+            sipManager.register("transfer_trunk_india", "exotel_route")
+            
+            // Handover state machine to terminate local loop
+            callStateMachine.forceTransition(CallState.HANGUP)
+            hangupCall()
         }
     }
+
+    private fun handleHangupState() {
+        serviceScope.launch {
+            val exitMessage = "Dhanyavaad. Yeh call ab samapt ho rahi hai. Thank you, the call is now disconnecting."
+            speak(exitMessage)
+            transcriptBuilder.append("Agent: ").append(exitMessage).append("\n")
+            
+            delay(3000)
+            hangupCall()
+        }
+    }
+
+    // ==========================================
+    // LIFECYCLE DESTRUCTION
+    // ==========================================
 
     override fun onDestroy() {
         super.onDestroy()
         Log.d(TAG, "AgentService onDestroy called")
+        stopAudioCapture()
+        stopSpeaking()
+        
         serviceJob.cancel()
         whisperEngine.release()
         piperEngine.release()
         llamaEngine.release()
+        vadEngine.release()
         callMemory.close()
+        
+        try {
+            ttsAudioTrack?.release()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error releasing AudioTrack: ${e.message}")
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -270,7 +542,6 @@ class AgentService : Service() {
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_menu_call)
             .build()
-        // Note: For a production app, the icon should be set to an actual drawable resource.
     }
 
     companion object {

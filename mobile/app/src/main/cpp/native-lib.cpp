@@ -204,3 +204,80 @@ Java_com_dograh_voiceagent_tts_PiperEngine_nativeRelease(
     JNIEnv *env, jobject thiz) {
     LOGD("Piper native resources released");
 }
+
+// ==========================================
+// VOICE ACTIVITY DETECTION (VAD) JNI BINDINGS
+// ==========================================
+
+static bool g_vad_initialized = false;
+static float g_vad_bg_noise = 0.0f;
+static float g_vad_alpha = 0.98f; // Slow background adaptation
+static float g_vad_threshold_ratio = 1.6f; // Signal must exceed background noise by this factor
+static float g_vad_min_rms = 100.0f; // Absolute silence floor
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_dograh_voiceagent_asr_VadEngine_nativeInit(
+    JNIEnv *env, jobject thiz) {
+    g_vad_initialized = true;
+    g_vad_bg_noise = g_vad_min_rms;
+    LOGD("Native VAD initialized");
+    return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_dograh_voiceagent_asr_VadEngine_nativeProcessFrame(
+    JNIEnv *env, jobject thiz, jshortArray pcm_data, jint length) {
+    
+    if (!g_vad_initialized || length <= 0) {
+        return JNI_FALSE;
+    }
+
+    jshort *samples = env->GetShortArrayElements(pcm_data, nullptr);
+    if (samples == nullptr) {
+        return JNI_FALSE;
+    }
+
+    // Compute RMS (Root Mean Square) energy of the frame
+    double sum_sq = 0.0;
+    for (int i = 0; i < length; ++i) {
+        double val = (double)samples[i];
+        sum_sq += val * val;
+    }
+    env->ReleaseShortArrayElements(pcm_data, samples, JNI_ABORT);
+
+    float rms = (float)sqrt(sum_sq / length);
+
+    // Adaptive noise tracking
+    if (rms < g_vad_bg_noise) {
+        // If the energy is lower than the current background estimate, update background quickly
+        g_vad_bg_noise = g_vad_bg_noise * 0.9f + rms * 0.1f;
+    } else {
+        // Slowly update background noise to adapt to shifting environments
+        g_vad_bg_noise = g_vad_bg_noise * g_vad_alpha + rms * (1.0f - g_vad_alpha);
+    }
+
+    // Safeguard background noise floor from dropping to zero
+    if (g_vad_bg_noise < g_vad_min_rms) {
+        g_vad_bg_noise = g_vad_min_rms;
+    }
+
+    // Speech is active if the current frame's RMS exceeds the background noise * ratio
+    bool is_speech = (rms > (g_vad_bg_noise * g_vad_threshold_ratio));
+
+    return is_speech ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_dograh_voiceagent_asr_VadEngine_nativeReset(
+    JNIEnv *env, jobject thiz) {
+    g_vad_bg_noise = g_vad_min_rms;
+    LOGD("Native VAD reset");
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_dograh_voiceagent_asr_VadEngine_nativeRelease(
+    JNIEnv *env, jobject thiz) {
+    g_vad_initialized = false;
+    LOGD("Native VAD released");
+}
+
