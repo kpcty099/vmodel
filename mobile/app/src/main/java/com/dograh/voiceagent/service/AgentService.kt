@@ -28,6 +28,8 @@ import com.dograh.voiceagent.memory.CallMemory
 import com.dograh.voiceagent.sip.SipManager
 import com.dograh.voiceagent.tts.PiperEngine
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 
@@ -179,10 +181,12 @@ class AgentService : Service() {
         sipManager.setListener(object : SipManager.SipListener {
             override fun onCallRinging() {
                 Log.d(TAG, "SIP Telephony Channel: Outbound Ringing...")
+                updateUiState { it.copy(sipState = SipState.REGISTERING, callState = CallState.RINGING) }
             }
 
             override fun onCallConnected() {
                 Log.d(TAG, "SIP Telephony Channel: Connected! Initializing conversation flow.")
+                updateUiState { it.copy(sipState = SipState.REGISTERED, callState = CallState.CONSENT) }
                 startBeepTimer()
 
                 // Present audible recording notification consent on connection
@@ -196,6 +200,7 @@ class AgentService : Service() {
 
             override fun onCallDisconnected() {
                 Log.d(TAG, "SIP Telephony Channel: Disconnected.")
+                updateUiState { it.copy(sipState = SipState.DISCONNECTED, callState = CallState.HANGUP) }
                 currentCallActive = false
                 stopBeepTimer()
                 stopSpeaking()
@@ -224,6 +229,7 @@ class AgentService : Service() {
 
             override fun onIncomingCall(callerNumber: String) {
                 Log.d(TAG, "Incoming PSTN/SIP Call from $callerNumber. Triggering automatic VoIP answer...")
+                updateUiState { it.copy(sipState = SipState.REGISTERED, callState = CallState.CONSENT) }
                 currentPhoneNumber = callerNumber
                 currentCallActive = true
                 transcriptBuilder.clear()
@@ -333,10 +339,21 @@ class AgentService : Service() {
 
         ttsSpeakingJob = serviceScope.launch(Dispatchers.Default) {
             isTtsSpeaking = true
+            
+            // Measure Piper synthesis execution latency
+            val startTime = System.currentTimeMillis()
             val pcmAudio = piperEngine.synthesize(text)
+            val latency = System.currentTimeMillis() - startTime
+
             if (pcmAudio != null && isActive && isTtsSpeaking) {
                 Log.d(TAG, "Playing synthesized speech chunk of size ${pcmAudio.size} samples")
-                
+                updateUiState { current ->
+                    current.copy(
+                        vadState = VadState.AGENT_SPEAKING,
+                        metrics = current.metrics.copy(ttsLatencyMs = latency)
+                    )
+                }
+
                 // Write in chunks to allow fine-grained interruption check
                 val chunkSize = 3200 // ~200ms blocks
                 var offset = 0
@@ -347,6 +364,7 @@ class AgentService : Service() {
                 }
             }
             isTtsSpeaking = false
+            updateUiState { it.copy(vadState = VadState.SILENT) }
         }
     }
 
@@ -473,6 +491,7 @@ class AgentService : Service() {
                     stopSpeaking()
                 }
                 isSpeechActive = true
+                updateUiState { it.copy(vadState = VadState.USER_SPEAKING) }
                 synchronized(accumulatedAudio) {
                     accumulatedAudio.clear()
                 }
@@ -480,6 +499,7 @@ class AgentService : Service() {
 
             override fun onSpeechStopped() {
                 isSpeechActive = false
+                updateUiState { it.copy(vadState = VadState.SILENT) }
                 Log.i(TAG, "User stopped speaking. Processing speech input...")
                 processSpeechInput()
             }
@@ -496,11 +516,29 @@ class AgentService : Service() {
         if (audioSamples.isEmpty()) return
 
         serviceScope.launch(Dispatchers.Default) {
-            // Retrieve transcription using event-driven on-device ASR buffer execution
+            // Retrieve transcription using event-driven on-device ASR buffer execution with latency measurement
+            val startTime = System.currentTimeMillis()
             val userText = whisperEngine.transcribeBuffer(audioSamples)
+            val latency = System.currentTimeMillis() - startTime
+
             if (userText.isNotBlank()) {
                 Log.d(TAG, "Final user transcription: $userText")
                 transcriptBuilder.append("User: ").append(userText).append("\n")
+
+                // Update unified state store with new transcript entry and ASR latency
+                val entry = TranscriptEntry(
+                    speaker = "User",
+                    text = userText,
+                    language = promptRouter.detectLanguage(userText).name,
+                    latencyMs = latency,
+                    timestamp = System.currentTimeMillis()
+                )
+                updateUiState { current ->
+                    current.copy(
+                        transcript = current.transcript + entry,
+                        metrics = current.metrics.copy(asrLatencyMs = latency)
+                    )
+                }
                 
                 // Enforce compliance and state machine logical routing
                 val stateChanged = callStateMachine.processInput(userText)
@@ -554,7 +592,11 @@ class AgentService : Service() {
                 <|im_start|>assistant
             """.trimIndent()
 
+            // Measure LLM generation execution latency
+            val startTime = System.currentTimeMillis()
             val jsonResponseStr = llamaEngine.generate(formattedPrompt)
+            val latency = System.currentTimeMillis() - startTime
+
             try {
                 val json = JSONObject(jsonResponseStr)
                 val reply = json.optString("reply", "")
@@ -563,6 +605,21 @@ class AgentService : Service() {
                 if (reply.isNotBlank()) {
                     speak(reply)
                     transcriptBuilder.append("Agent: ").append(reply).append("\n")
+
+                    // Publish Agent transcript bubble to State Store
+                    val entry = TranscriptEntry(
+                        speaker = "Agent",
+                        text = reply,
+                        language = detectedLang.name,
+                        latencyMs = latency,
+                        timestamp = System.currentTimeMillis()
+                    )
+                    updateUiState { current ->
+                        current.copy(
+                            transcript = current.transcript + entry,
+                            metrics = current.metrics.copy(llmLatencyMs = latency)
+                        )
+                    }
                 }
 
                 when (action) {
@@ -713,5 +770,55 @@ class AgentService : Service() {
         const val EXTRA_PHONE_NUMBER = "com.dograh.voiceagent.EXTRA_PHONE_NUMBER"
         const val EXTRA_CALL_ID = "com.dograh.voiceagent.EXTRA_CALL_ID"
         const val EXTRA_CALLER_NUMBER = "com.dograh.voiceagent.EXTRA_CALLER_NUMBER"
+
+        // Unified StateStore for Telecom Observability Console
+        private val _uiState = MutableStateFlow(AgentUiState())
+        val uiState = _uiState.asStateFlow()
+
+        fun updateUiState(reducer: (AgentUiState) -> AgentUiState) {
+            _uiState.value = reducer(_uiState.value)
+            
+            // Periodically refresh JVM memory consumption MB
+            try {
+                val runtime = Runtime.getRuntime()
+                val usedMemory = (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024)
+                _uiState.value = _uiState.value.copy(
+                    metrics = _uiState.value.metrics.copy(memoryUsageMb = usedMemory)
+                )
+            } catch (e: Exception) {
+                // Ignore
+            }
+        }
     }
 }
+
+// ==========================================
+// TELEPHONY OBSERVABILITY DATA MODELS
+// ==========================================
+
+enum class SipState { DISCONNECTED, REGISTERING, REGISTERED }
+enum class VadState { SILENT, USER_SPEAKING, AGENT_SPEAKING, RECONNECTING }
+
+data class TranscriptEntry(
+    val speaker: String, // "User" or "Agent"
+    val text: String,
+    val language: String,
+    val latencyMs: Long,
+    val timestamp: Long
+)
+
+data class Metrics(
+    val asrLatencyMs: Long = 0,
+    val llmLatencyMs: Long = 0,
+    val ttsLatencyMs: Long = 0,
+    val memoryUsageMb: Long = 0
+)
+
+data class AgentUiState(
+    val sipState: SipState = SipState.DISCONNECTED,
+    val callState: CallState = CallState.GREETING,
+    val transcript: List<TranscriptEntry> = emptyList(),
+    val vadState: VadState = VadState.SILENT,
+    val metrics: Metrics = Metrics()
+)
+
