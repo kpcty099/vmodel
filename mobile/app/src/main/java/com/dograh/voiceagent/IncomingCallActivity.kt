@@ -148,7 +148,7 @@ private fun IncomingCallScreen(
                         verticalArrangement = Arrangement.spacedBy(18.dp)
                     ) {
                         Text(
-                            text = "Incoming Dograh Call",
+                            text = "Incoming V-Model Call",
                             color = Color(0xFFEAF2F4),
                             fontSize = 20.sp,
                             fontWeight = FontWeight.SemiBold,

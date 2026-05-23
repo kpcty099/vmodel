@@ -72,7 +72,7 @@ class AgentService : Service() {
         super.onCreate()
         Log.d(TAG, "AgentService onCreate called")
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification("Dograh Voice Agent Active"))
+        startForeground(NOTIFICATION_ID, buildNotification("V-Model Voice Agent Active"))
 
         // Initialize ToneGenerator for Indian regulatory compliance (audible beep every 15s)
         try {
@@ -703,7 +703,7 @@ class AgentService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val serviceChannel = NotificationChannel(
                 CHANNEL_ID,
-                "Dograh Voice Agent Channel",
+                "V-Model Voice Agent Channel",
                 NotificationManager.IMPORTANCE_DEFAULT
             )
             val manager = getSystemService(NotificationManager::class.java)
@@ -713,7 +713,7 @@ class AgentService : Service() {
 
     private fun buildNotification(text: String): Notification {
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Dograh Autonomous Caller")
+            .setContentTitle("V-Model Autonomous Caller")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_menu_call)
             .build()
@@ -756,7 +756,7 @@ class AgentService : Service() {
     companion object {
         private const val TAG = "AgentService"
         private const val NOTIFICATION_ID = 1001
-        private const val CHANNEL_ID = "DograhAgentChannel"
+        private const val CHANNEL_ID = "VModelAgentChannel"
         private const val INCOMING_CALL_WAKE_LOCK_TIMEOUT_MS = 60_000L
 
         const val ACTION_START_AGENT = "com.dograh.voiceagent.ACTION_START_AGENT"

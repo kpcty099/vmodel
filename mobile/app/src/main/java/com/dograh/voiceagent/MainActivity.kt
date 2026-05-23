@@ -186,7 +186,7 @@ fun ConsoleDashboardScreen(
                 ) {
                     Column {
                         Text(
-                            text = "D O G R A H",
+                            text = "V - M O D E L",
                             fontSize = 24.sp,
                             fontWeight = FontWeight.Bold,
                             color = Color(0xFF00E676),

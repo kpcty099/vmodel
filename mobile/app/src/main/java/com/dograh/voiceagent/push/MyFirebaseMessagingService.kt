@@ -87,7 +87,7 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
 
         val notification = NotificationCompat.Builder(this, INCOMING_CALL_CHANNEL_ID)
             .setSmallIcon(android.R.drawable.sym_call_incoming)
-            .setContentTitle("Incoming Dograh call")
+            .setContentTitle("Incoming V-Model Call")
             .setContentText(callerNumber)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_CALL)
@@ -112,7 +112,7 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
 
         val channel = NotificationChannel(
             INCOMING_CALL_CHANNEL_ID,
-            "Incoming Dograh Calls",
+            "Incoming V-Model Calls",
             NotificationManager.IMPORTANCE_HIGH
         ).apply {
             description = "Full-screen incoming VoIP call alerts"

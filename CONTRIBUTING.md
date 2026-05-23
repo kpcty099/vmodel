@@ -1,63 +1,43 @@
-# Contributing to Dograh AI
+# Contributing to V-Model ❤️
 
-Welcome to Dograh AI! ❤️ Thank you for your interest in contributing to the future of open-source voice AI. ❤️
+Thank you for your interest in contributing to V-Model—the low-latency, on-device multilingual telephony AI voice agent! 
 
-Dograh AI is a comprehensive voice agent platform that helps developers build, test, and deploy conversational AI systems with minimal setup. This guide will help you understand the project structure, set up your development environment, and start contributing effectively.
+V-Model is fully open-source. Because it combines native C++ engines, Kotlin services, and Python signaling backends, we follow systematic standards to ensure the codebase remains stable, secure, and extremely performant.
 
-👉 Join our community → [Dograh Community Slack](https://join.slack.com/t/dograh-community/shared_invite/zt-3czr47sw5-MSg1J0kJ7IMPOCHF~03auQ)
+---
 
-## 🏗️ Project Overview
+## 🏗️ Technical Architecture Overview
 
-### What is Dograh AI?
+V-Model consists of two core systems:
+1.  **Android Client (`mobile/`)**: Native application containing our core pipelines:
+    *   **PJSIP**: Standard carrier VoIP stack integration.
+    *   **whisper.cpp**: Automatic speech recognition.
+    *   **llama.cpp**: Local GGUF LLM execution (with Hinglish/Telugu routing support).
+    *   **piper**: Local text-to-speech engine.
+    *   **sqlite-vec**: Embedded vector database for local conversation RAG.
+2.  **Wakeup Server (`api/`)**: Lightweight FastAPI server designed to catch incoming carrier webhooks and dispatch silent, high-priority FCM notifications to wake the Android client.
 
-Dograh AI is a full-stack platform for building voice agents with a drag-and-drop workflow builder. It combines multiple technologies to provide a seamless experience from development to production deployment.
+---
 
-## 🙌 How You Can Contribute
+## 🛠️ Contribution Guidelines
 
-- 🐛 **Report bugs** via [GitHub Issues](https://github.com/dograh-hq/dograh/issues)
-- 💡 **Suggest features** via [Ideas](https://github.com/orgs/dograh-hq/discussions/categories/ideas)
-- 🔧 **Submit pull requests**
-- 📖 **Improve documentation** The documentation is hosted via mintlify and the code is in `docs/` folder
-- 💬 **Join the Slack community**
+We welcome contributions across all areas of the project. To maintain system stability, please follow these guidelines:
 
-👉 A great place to start is with issues tagged **`good first issue`**.
+### 1. Code Quality & Formatting
+*   **Kotlin / Android UI**: Ensure Jetpack Compose components follow clean dark industrial design principles. Avoid heavy asset allocations in render loops.
+*   **C++ / JNI**: Keep your JNI methods clean and aligned with the `com.dograh.voiceagent` namespace. Release all native allocations inside destructor interfaces to prevent memory leaks.
+*   **Python**: Follow PEP 8 styles for FastAPI endpoints. Keep route handlers thin; all core notification logic belongs in `api/services/`.
 
-> And if you like the project, but just don't have time to contribute code, that's fine. There are other easy ways to support the project:
->
-> - Star the project;
-> - Tweet about it;
-> - Refer to this project in your project's readme;
-> - Submit and vote on [Ideas](https://github.com/orgs/dograh-hq/discussions/categories/ideas);
-> - Create and comment on [Issues](https://github.com/dograh-hq/dograh/issues);
-> - Mention the project at local meetups and tell your friends/colleagues.
+### 2. Submitting Pull Requests
+1.  Fork the repository and create your feature branch:
+    ```bash
+    git checkout -b feature/AmazingFeature
+    ```
+2.  Commit your changes following standard prefix guidelines (e.g. `feat(android): add German whisper support`, `fix(jni): resolve audio buffer overflow`).
+3.  Push to your fork and submit a Pull Request to our `main` branch.
 
-## 🚀 Development Setup
+### 3. Reporting Issues & Feedback
+*   Report bugs or request enhancements by opening a [GitHub Issue](https://github.com/kpcty099/vmodel/issues).
+*   For questions or suggestions, join our repository discussions.
 
-Please refer to our [Development Setup documentation](https://docs.dograh.com/contribution/setup).
-
-### Getting Help
-
-**Before You Start**
-
-- Check existing [GitHub Issues](../../issues) for similar work
-- Join our [Slack community](https://join.slack.com/t/dograh-community/shared_invite/zt-3czr47sw5-MSg1J0kJ7IMPOCHF~03auQ) to discuss your plans
-- Look for issues tagged `good first issue` for beginner-friendly tasks
-
-**During Development**
-
-- Ask questions in our Slack community
-- Reference related issues and PRs in your discussions
-- Share early drafts for feedback on complex features
-
-## 💬 Community & Support
-
-Our Slack community is the heart of Dograh AI development:
-
-- **Get Help**: Setup assistance and debugging support
-- **Collaborate**: Discuss features and architectural decisions
-- **Connect**: Meet other contributors and maintainers
-- **Stay Updated**: Learn about contribution opportunities and releases
-
-👉 **Join us**: [Dograh Community Slack](https://join.slack.com/t/dograh-community/shared_invite/zt-3czr47sw5-MSg1J0kJ7IMPOCHF~03auQ)
-
-Thank you for helping us keep voice AI open and accessible! 🎉
+Thank you for helping us make privacy-first voice AI calling open and accessible! 🚀

@@ -1,178 +1,138 @@
-# Dograh AI
+# V-Model: Low-Latency On-Device Multilingual Telephony AI Voice Agent
 
-**The open-source, self-hostable alternative to Vapi & Retell** — build production voice agents with a drag-and-drop workflow builder. From zero to a working bot in under 2 minutes.
-
-<p align="center">
-  <a href="https://app.dograh.com">
-    <img src="https://img.shields.io/badge/▶_Try_the_Cloud-app.dograh.com-2563eb?style=for-the-badge" alt="Try the Cloud">
-  </a>
-  &nbsp;
-  <a href="#-get-started">
-    <img src="https://img.shields.io/badge/⚡_Self--host_in_60s-One_command-111827?style=for-the-badge" alt="Self-host in 60s">
-  </a>
-  &nbsp;
-  <a href="https://join.slack.com/t/dograh-community/shared_invite/zt-3czr47sw5-MSg1J0kJ7IMPOCHF~03auQ">
-    <img src="https://img.shields.io/badge/💬_Join_Slack-Community-4A154B?style=for-the-badge&logo=slack" alt="Join Slack">
-  </a>
-</p>
+**V-Model** is an open-source, completely offline/local, privacy-first mobile telephony calling agent designed for low-latency, speech-to-speech voice interactions. Operating natively on-device, V-Model utilizes advanced gated Voice Activity Detection (VAD), localized state machines, local LLMs/ASR/TTS, lockscreen call overlays, and authentic carrier SIP integrations to deliver an elite voice calling experience without external SaaS API dependencies.
 
 <p align="center">
-  <a href="https://docs.dograh.com">📖 Docs</a> &nbsp;·&nbsp;
-  <a href="LICENSE">📜 BSD 2-Clause</a> &nbsp;·&nbsp;
-  <a href="README.zh-CN.md">🌐 中文</a>
+  <img src="docs/images/architecture_hero.png" alt="V-Model Beautiful Telecom NOC Console" width="85%" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);">
 </p>
 
-<p align="center">
-  <img src="docs/images/hero.gif" alt="Dograh in action — build a workflow, launch a voice agent, talk to it" width="80%">
-</p>
+---
 
-- **100% open source**, self-hostable — no vendor lock-in, unlike Vapi or Retell
-- **Full control & transparency** — every line of code is open, with flexible LLM / TTS / STT integration
-- **Maintained by YC alumni and exit founders**, committed to keeping voice AI open
+## ⚡ Core Philosophy & Architecture
 
-## 🎥 Featured
+Most voice AI calling architectures suffer from high latency, massive network bandwidth costs, and severe privacy issues because they route raw audio to SaaS voice orchestrators. 
 
-<div align="center">
-  <a href="https://www.youtube.com/watch?v=xD9JEvfCH9k">
-    <img src="https://img.youtube.com/vi/xD9JEvfCH9k/maxresdefault.jpg" alt="Dograh featured by Better Stack" width="80%" style="border-radius: 8px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
-  </a>
-  <br>
-  <em>Featured by <strong>Better Stack</strong> — a hands-on look at Dograh</em>
-</div>
+**V-Model breaks this model** by shifting the entire voice logic, media synthesis, and intelligence layer directly onto the Edge:
+*   **On-Device AI Engines**: Embedded JNI wrappers compile C++ engines for automatic speech recognition (`whisper.cpp`), local inference (`llama.cpp`), and voice synthesis (`piper` TTS).
+*   **Gated Voice Activity Detection**: Employs dynamic frame-level VAD amplitude gating to completely prevent network chatter, instantly interrupting agent TTS when the user starts speaking.
+*   **Decoupled Silent Push Signaling**: Separates call signaling from the ringing UI. High-priority FCM push notifications act as a silent wake-up signal to register PJSIP carrier stacks, prompting the call overlay strictly on receiving the live SIP `INVITE`.
+*   **Beautiful Telecom Observability**: Includes a Nothing OS-style NOC (Network Operations Center) debugging dashboard displaying real-time audio amplitudes, localized Call State progress, live transcript bubbles, and exact LLM/ASR/TTS latency telemetry.
 
-<details>
-<summary>📺 Prefer a 2-minute product walkthrough? Click here.</summary>
-
-<div align="center">
-  <a href="https://youtu.be/9gPneyf9M9w">
-    <img src="docs/images/video_thumbnail_1.png" alt="Watch Dograh AI Demo Video" width="70%" style="border-radius: 8px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
-  </a>
-</div>
-
-</details>
-
-## ⚖️ Dograh vs Vapi vs Retell
-
-An honest comparison on the axes that matter most to teams evaluating voice AI platforms.
-
-|  | **Dograh** | **Vapi** | **Retell** |
-|---|---|---|---|
-| **License** | BSD 2-Clause (open source) | Proprietary | Proprietary |
-| **Self-hostable** | ✅ Yes — one Docker command | ❌ SaaS only | ❌ SaaS only |
-| **Pricing** | Free (self-host) · usage-based (cloud) | Per-minute SaaS | Per-minute SaaS |
-| **Bring your own LLM / STT / TTS** | ✅ Any provider, or use Dograh's stack | Configurable within their integrations | Configurable within their integrations |
-| **Source-level customization** | ✅ Every line is yours to modify | ❌ Closed source | ❌ Closed source |
-| **Data residency** | Your infra, your rules | Their cloud | Their cloud |
-| **Vendor lock-in** | None | Full | Full |
-
-
-## 🚀 Get Started
-
-##### Download and setup Dograh on your Local Machine
-
-> **Note**
-> We collect anonymous usage data to improve the product. You can opt out by setting the `ENABLE_TELEMETRY` to `false` in the below command.
-
-> **Note**
-> If you wish to run the platform on a remote server instead, checkout our [Documentation](https://docs.dograh.com/deployment/docker#option-2:-remote-server-deployment)
-
-```bash
-curl -o docker-compose.yaml https://raw.githubusercontent.com/dograh-hq/dograh/main/docker-compose.yaml && REGISTRY=ghcr.io/dograh-hq ENABLE_TELEMETRY=true docker compose up --pull always
+```text
+                                   --- V-MODEL DECOUPLED CALL FLOW ---
+                                   
+   [ PSTN / SIP Carrier ]              [ FastAPI Wake Server ]              [ V-Model Android Client ]
+             │                                    │                                      │
+             │──( Incoming PSTN Call Hook )──────>│                                      │
+             │                                    │──( High-Priority Silent FCM Push )──>│ (Partial WakeLock)
+             │                                    │                                      │          │
+             │                                    │                                      │ [Foreground Service]
+             │                                    │                                      │          │
+             │<──( Local JNI PJSIP Registration )────────────────────────────────────────│ <(SIP Re-registration)
+             │                                                                           │
+             │──( SIP INVITE Arrives Over Carrier )─────────────────────────────────────>│
+             │                                                                           │──[Launch Overlay UI]
+             │                                                                           │  (IncomingCallActivity)
+             │<──( User Answers: Establish Full-Duplex Audio Channel )───────────────────│
+             │                                                                           │──[Local Voice Loop]
+             │                                                                           │  • whisper.cpp (ASR)
+             │                                                                           │  • llama.cpp (Local LLM)
+             │                                                                           │  • piper (Local TTS)
+             │                                                                           │  • sqlite-vec (Local RAG)
 ```
 
-> **Note**
-> First startup may take 2-3 minutes to download all images. Once running, open http://localhost:3010 to create your first AI voice assistant!
-> For common issues and solutions, see 🔧 **[Troubleshooting](docs/troubleshooting.md)**.
+---
 
-### 🎙️ Your First Voice Bot
+## 🛠️ Unified System Tech Stack
 
-1. Open [http://localhost:3010](http://localhost:3010) in your browser.
-2. Pick **Inbound** or **Outbound**, name your bot (e.g. _Lead Qualification_), and describe the use case in 5–10 words (e.g. _Screen insurance form submissions for purchase intent_).
-3. Click **Web Call** — you're talking to your bot.
+V-Model leverages a native-first C++ stack built to maximize execution efficiency on mobile CPU/NPU cores:
 
-> 🔑 **No API keys needed.** Dograh ships with auto-generated keys and its own LLM / TTS / STT stack. Connect your own keys for LLM, TTS, STT, or Telephony (e.g. Twilio, Vonage, Telnyx) anytime.
+| Subsystem Component | Framework / Engine | Implementation Detail |
+| :--- | :--- | :--- |
+| **VOIP Telephony Stack** | **PJSIP (JNI Binding)** | Compiles a custom SIP/RTP engine via NDK, registering SIP accounts and handling JNI listener bindings synchronously. |
+| **Voice Activity Gating** | **WebRTC VAD C++** | Tracks raw PCM audio amplitudes over 10ms-30ms frames, gating ASR pipeline streams and executing immediate TTS interruption. |
+| **Speech Recognition (ASR)** | **Whisper.cpp (GGML)** | Streams 16kHz raw mono audio to an optimized 8-bit quantized Whisper-Base GGML model for low-latency inference. |
+| **Inference Engine (LLM)** | **Llama.cpp (GGUF)** | Locally executes `Qwen-1.5B-Instruct` or `Gemma-2B-IT` models using 4-bit/8-bit weight quantization, supporting Hinglish/Telugu code-switching. |
+| **Speech Synthesis (TTS)** | **Piper TTS (Raw WAV)** | Generates lifelike 16kHz audio chunks with custom voice models, sending raw buffers directly to Android `AudioTrack` streams. |
+| **Local Memory (RAG)** | **Sqlite-Vec (C Extension)** | Loads a native vector database client inside Android's SQLite engine to match conversation embeddings with k-NN cosine queries. |
+| **Wake-Up Daemon** | **FastAPI + Firebase Admin** | Small, high-throughput backend webhook service triggered by carrier incoming call webhooks to broadcast silent FCM wakeup tags. |
 
-## Features
+---
 
-### Voice Capabilities
+## 📱 Developer Console Dashboard
 
-- Telephony: Built-in telephony integration like Twilio, Vonage, Vobiz, Cloudonix (easily add others), with support for transferring calls to human agents
-- Languages: English support (expandable to other languages)
-- Custom Models: Bring your own TTS/STT models
-- Real-time Processing: Low-latency voice interactions
+The V-Model main dashboard (`MainActivity.kt`) utilizes a Nothing OS / Tesla-inspired dark industrial design language to ensure absolute observability during system testing.
 
-### Developer Experience
+### Observability Features:
+1.  **System Health Strip**: Live status monitor grids displaying real-time SIP registration, ASR Engine configuration, TTS synthesis rates, VAD talking states, and local vector RAG cache usage.
+2.  **Call Sequence Progression**: Interactive, step-by-step visual progression tracking the call lifecycle states (`GREET` ➔ `CONSENT` ➔ `TALK` ➔ `XFER` ➔ `END`).
+3.  **Real-Time Amplitude Waveform**: Animated Jetpack Compose Canvas reflecting live amplitude changes and speaker transitions (User Speaking vs Agent Speaking).
+4.  **Live Telemetry Transcript bubbles**: Interactive transcript bubble feeds rendering incoming speech-to-text text, alongside complete end-to-end latency metrics (ASR + LLM + TTS execution in milliseconds).
+5.  **Telecom Control Panel**: Debug controls containing destination text fields, manual SIP dialing triggers, simulated FCM silent pushes, and local vector memory wipe triggers.
 
-- Zero Config Start: Auto-generated API keys for instant testing
-- Python-Based: Built on Python for easy customization
-- Docker-First: Containerized for consistent deployments
-- Modular Architecture: Swap components as needed
+---
 
-### Testing & Quality
+## 🧪 Development, Compilation & Simulation Testing
 
-- **Test Mode**: Try your agent end-to-end before publishing, with no production calls or data affected
-- **In-Dashboard Web Calls**: Talk to your bot directly while building — no telephony setup required
-- **QA Node**: A built-in workflow node that analyzes prompt quality across your other nodes
+### 1. Native Compilation (CMake & Gradle)
+The Android client integrates native C++ engines compiled directly via Android NDK CMake lists. 
 
-## Deployment Options
+```bash
+# Build the native library artifacts directly using Gradle wrapper
+./gradlew :app:assembleDebug
+```
 
-### Local Development
+Native wrappers and headers are located inside the `mobile/app/src/main/cpp` folder. The compiler targets `arm64-v8a` and `armeabi-v7a` architectures to ensure maximum performance across hardware platforms.
 
-Refer [Local Setup](https://docs.dograh.com/contribution/setup)
+### 2. SQLite-Vec RAG Integration
+Call logs are structured in a standard SQLite database alongside vector embeddings using the `sqlite-vec` extension (`libsqlite_vec.so`). To prevent byte array encoding bugs, V-Model utilizes compile-safe Android `rawQueryWithFactory` queries to bind vector float buffers directly:
 
-### Self-Hosted Deployment
+```kotlin
+val cursor = db.rawQueryWithFactory(
+    { _, driver, editTable, queryObj ->
+        queryObj.bindBlob(1, queryVectorBlob)
+        queryObj.bindLong(2, limit.toLong())
+        android.database.sqlite.SQLiteCursor(driver, editTable, queryObj)
+    },
+    "SELECT c.id, v.distance FROM vec_calls v JOIN calls c ON v.call_id = c.id WHERE v.embedding MATCH ?1 AND k = ?2",
+    null,
+    null
+)
+```
 
-For detailed deployment instructions including remote server setup with HTTPS, see our [Docker Deployment Guide](https://docs.dograh.com/deployment/docker).
+### 3. Local Debug Simulation
+To test the entire background FCM wake signaling and lockscreen caller overlay path without real SIP credentials, use the local simulator receiver class (`IncomingCallSimulationReceiver.kt`).
 
-### Cloud Version
+Run the following ADB broadcast shell command from your development workstation:
 
-Visit [https://www.dograh.com](https://www.dograh.com/) for our managed cloud offering.
+```bash
+adb shell am broadcast \
+  -a com.dograh.voiceagent.DEBUG_SIMULATE_INCOMING_CALL \
+  --es call_id sim-001 \
+  --es caller_number +919876543210 \
+  -n com.dograh.voiceagent/.debug.IncomingCallSimulationReceiver
+```
 
-## 📚Documentation
+This triggers the following sequence:
+1. Registers a silent FCM broadcast intent containing simulated caller meta parameters.
+2. Acquires a short-term 30s background `WAKE_LOCK` to bypass Doze limits.
+3. Spawns `AgentService.kt` in the foreground with microphone-service privileges.
+4. Brings up the elegant `IncomingCallActivity.kt` keyguard overlay directly over locked devices.
 
-You can go to [https://docs.dograh.com](https://docs.dograh.com/) for our documentation.
+---
 
-## 🤝Community & Support
+## 🤝 Contributing & Standards
 
-> 👋 **Coming from the Better Stack video?** Drop your use case in our [pinned GitHub Discussion](https://github.com/orgs/dograh-hq/discussions/291) — we read every reply and the founders personally onboard early adopters.
+We welcome contributions to V-Model! We hold ourselves to strict native engineering standards:
+*   Keep native JNI JNI-bridge method signatures aligned with JNI naming structures to prevent runtime crashes.
+*   Prioritize local memory optimization. Verify that C++ engines release native pointers appropriately (`llama_free`, `whisper_free`, `pjsua_destroy`).
+*   Ensure all database vector queries include standard text fallbacks to maintain system stability even on older Android versions.
+*   Keep Jetpack Compose layouts clean, responsive, and aligned with our dark console observability aesthetics.
 
-- **Slack** — the cornerstone of Dograh AI contributions. Connect with maintainers, discuss features before coding, get help with setup, and stay current on contribution sprints.
-- **GitHub Discussions** — share use cases, ask questions, swap workflow recipes.
-- **GitHub Issues** — report bugs or request features.
+---
 
-👉 Join us → [Dograh Community Slack](https://join.slack.com/t/dograh-community/shared_invite/zt-3czr47sw5-MSg1J0kJ7IMPOCHF~03auQ)
+## 🏢 License
 
-## 🙌 Contributing
+V-Model is licensed under the [BSD 2-Clause License](LICENSE) to support open-source development, academic research, and custom enterprise deployments.
 
-We love contributions! Dograh AI is 100% open source and we intend to keep it that way.
-
-### Getting Started
-
-- Fork the repository
-- Create your feature branch (git checkout -b feature/AmazingFeature)
-- Commit your changes (git commit -m 'Add some AmazingFeature')
-- Push to the branch (git push origin feature/AmazingFeature)
-- Open a Pull Request
-
-## ⭐ Star History
-
-<a href="https://star-history.com/#dograh-hq/dograh&Date">
-  <img src="https://api.star-history.com/svg?repos=dograh-hq/dograh&type=Date" alt="Dograh star history" width="80%">
-</a>
-
-## 📄 License
-
-Dograh AI is licensed under the [BSD 2-Clause License](LICENSE)- the same license as projects that were used in building Dograh AI, ensuring compatibility and freedom to use, modify, and distribute.
-
-## 🏢 About
-
-Built with ❤️ by **Dograh** (Zansat Technologies Private Limited)
-Founded by YC alumni and exit founders committed to keeping voice AI open and accessible to everyone.
-
-<br><br><br>
-
-  <p align="center">
-    <a href="https://github.com/dograh-hq/dograh/stargazers">⭐ Star us on GitHub</a> |
-    <a href="https://app.dograh.com">☁️ Try Cloud Version</a> |
-    <a href="https://join.slack.com/t/dograh-community/shared_invite/zt-3czr47sw5-MSg1J0kJ7IMPOCHF~03auQ">💬 Join Slack</a>
-  </p>
+*Built with ❤️ for low-latency, privacy-first mobile AI telephony.*
