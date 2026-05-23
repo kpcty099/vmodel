@@ -8,11 +8,15 @@ import android.util.Log
 
 class CallMemory(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, null, DATABASE_VERSION) {
 
+    private var isVectorEnabled = false
+
     init {
         try {
             System.loadLibrary("sqlite_vec")
+            isVectorEnabled = true
             Log.d(TAG, "sqlite-vec native library loaded successfully")
         } catch (e: UnsatisfiedLinkError) {
+            isVectorEnabled = false
             Log.e(TAG, "Failed to load sqlite-vec native library: ${e.message}")
         }
     }
@@ -49,6 +53,7 @@ class CallMemory(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, nu
             """)
             Log.d(TAG, "sqlite-vec virtual table created")
         } catch (e: Exception) {
+            isVectorEnabled = false
             Log.e(TAG, "Failed to create sqlite-vec virtual table: ${e.message}")
         }
     }
@@ -74,7 +79,7 @@ class CallMemory(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, nu
             }
             val callId = db.insert("calls", null, values)
 
-            if (callId != -1L) {
+            if (callId != -1L && isVectorEnabled) {
                 // Serializing float array to byte array for sqlite-vec BLOB insertion
                 val byteBuffer = java.nio.ByteBuffer.allocate(embedding.size * 4)
                 byteBuffer.order(java.nio.ByteOrder.LITTLE_ENDIAN)
@@ -89,6 +94,9 @@ class CallMemory(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, nu
                 stmt.executeInsert()
                 db.setTransactionSuccessful()
                 Log.d(TAG, "Call record $callId and embedding saved successfully")
+            } else {
+                db.setTransactionSuccessful()
+                Log.d(TAG, "Call record $callId saved (vector database disabled)")
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error saving call record: ${e.message}")
@@ -98,38 +106,78 @@ class CallMemory(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, nu
     }
 
     /**
-     * Query local memory using vector search (k-NN search via sqlite-vec).
+     * Query local memory using vector search (k-NN search via sqlite-vec) with a robust standard text fallback.
      */
     fun queryCallMemory(queryEmbedding: FloatArray, limit: Int = 3): List<CallRecord> {
         val results = mutableListOf<CallRecord>()
         val db = readableDatabase
 
-        try {
-            // Load extension for connection if needed (some SQLite wrappers don't persist extensions)
+        if (isVectorEnabled) {
             try {
-                db.execSQL("SELECT load_extension('libsqlite_vec.so')")
+                // Load extension for connection if needed (some SQLite wrappers don't persist extensions)
+                try {
+                    db.execSQL("SELECT load_extension('libsqlite_vec.so')")
+                } catch (e: Exception) {
+                    // Silent catch: it might already be loaded
+                }
+
+                // Serialize query embedding to byte array
+                val byteBuffer = java.nio.ByteBuffer.allocate(queryEmbedding.size * 4)
+                byteBuffer.order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                for (value in queryEmbedding) {
+                    byteBuffer.putFloat(value)
+                }
+                val blob = byteBuffer.array()
+
+                // Perform k-NN query using vec_distance_cosine or standard vec_distance_l2
+                val query = """
+                    SELECT c.id, c.timestamp, c.phone_number, c.direction, c.transcript, c.summary, v.distance
+                    FROM vec_calls v
+                    JOIN calls c ON v.call_id = c.id
+                    WHERE v.embedding MATCH ?1 AND k = ?2
+                    ORDER BY v.distance ASC
+                """.trimIndent()
+
+                // Use rawQueryWithFactory to successfully bind the binary BLOB argument
+                val cursor = db.rawQueryWithFactory(
+                    { _, driver, editTable, queryObj ->
+                        queryObj.bindBlob(1, blob)
+                        queryObj.bindLong(2, limit.toLong())
+                        android.database.sqlite.SQLiteCursor(driver, editTable, queryObj)
+                    },
+                    query,
+                    null,
+                    null
+                )
+
+                while (cursor.moveToNext()) {
+                    val id = cursor.getLong(cursor.getColumnIndexOrThrow("id"))
+                    val timestamp = cursor.getString(cursor.getColumnIndexOrThrow("timestamp"))
+                    val phoneNumber = cursor.getString(cursor.getColumnIndexOrThrow("phone_number"))
+                    val direction = cursor.getString(cursor.getColumnIndexOrThrow("direction"))
+                    val transcript = cursor.getString(cursor.getColumnIndexOrThrow("transcript"))
+                    val summary = cursor.getString(cursor.getColumnIndexOrThrow("summary"))
+                    val distance = cursor.getFloat(cursor.getColumnIndexOrThrow("distance"))
+
+                    results.add(CallRecord(id, timestamp, phoneNumber, direction, transcript, summary, distance))
+                }
+                cursor.close()
+                Log.d(TAG, "Vector search query returned ${results.size} matches")
+                return results
             } catch (e: Exception) {
-                // Silent catch: it might already be loaded
+                Log.e(TAG, "Vector search query failed: ${e.message}. Attempting text search fallback.")
             }
+        }
 
-            // Serialize query embedding to byte array
-            val byteBuffer = java.nio.ByteBuffer.allocate(queryEmbedding.size * 4)
-            byteBuffer.order(java.nio.ByteOrder.LITTLE_ENDIAN)
-            for (value in queryEmbedding) {
-                byteBuffer.putFloat(value)
-            }
-            val blob = byteBuffer.array()
-
-            // Perform k-NN query using vec_distance_cosine or standard vec_distance_l2
-            val query = """
-                SELECT c.id, c.timestamp, c.phone_number, c.direction, c.transcript, c.summary, v.distance
-                FROM vec_calls v
-                JOIN calls c ON v.call_id = c.id
-                WHERE v.embedding MATCH ?1 AND k = ?2
-                ORDER BY v.distance ASC
+        // Standard text fallback query: fetches recent calls if vector DB is unavailable
+        try {
+            val fallbackQuery = """
+                SELECT id, timestamp, phone_number, direction, transcript, summary, 0.0 AS distance
+                FROM calls
+                ORDER BY id DESC
+                LIMIT ?
             """
-
-            val cursor = db.rawQuery(query, arrayOf(blob.toString(), limit.toString())) // Raw SQL query
+            val cursor = db.rawQuery(fallbackQuery, arrayOf(limit.toString()))
             while (cursor.moveToNext()) {
                 val id = cursor.getLong(cursor.getColumnIndexOrThrow("id"))
                 val timestamp = cursor.getString(cursor.getColumnIndexOrThrow("timestamp"))
@@ -142,8 +190,9 @@ class CallMemory(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, nu
                 results.add(CallRecord(id, timestamp, phoneNumber, direction, transcript, summary, distance))
             }
             cursor.close()
+            Log.d(TAG, "Text fallback search query returned ${results.size} matches")
         } catch (e: Exception) {
-            Log.e(TAG, "Vector search query failed: ${e.message}")
+            Log.e(TAG, "Text fallback search failed: ${e.message}")
         }
 
         return results
