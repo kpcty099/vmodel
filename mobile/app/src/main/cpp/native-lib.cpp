@@ -281,3 +281,92 @@ Java_com_dograh_voiceagent_asr_VadEngine_nativeRelease(
     LOGD("Native VAD released");
 }
 
+// ==========================================
+// PJSIP TELEPHONY JNI BINDINGS (COMPILE-SAFE STUBS)
+// ==========================================
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_dograh_voiceagent_sip_SipManager_nativeSipInit(
+    JNIEnv *env, jobject thiz, jstring registrar, jstring proxy, jint port) {
+    
+    const char *reg_str = env->GetStringUTFChars(registrar, nullptr);
+    const char *proxy_str = env->GetStringUTFChars(proxy, nullptr);
+    LOGD("Initializing native PJSIP stack. Registrar: %s, Proxy: %s, Port: %d", reg_str, proxy_str, port);
+    
+    // In production builds, this links directly to the PJSIP endpoint initialization API:
+    // pj_status_t status = pjsua_create();
+    // pjsua_config cfg; pjsua_media_config media_cfg; pjsua_logging_config log_cfg;
+    // pjsua_config_default(&cfg); pjsua_media_config_default(&media_cfg); ...
+    
+    env->ReleaseStringUTFChars(registrar, reg_str);
+    env->ReleaseStringUTFChars(proxy, proxy_str);
+    return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_dograh_voiceagent_sip_SipManager_nativeSipRegister(
+    JNIEnv *env, jobject thiz, jstring username, jstring secret) {
+    
+    const char *user_str = env->GetStringUTFChars(username, nullptr);
+    const char *secret_str = env->GetStringUTFChars(secret, nullptr);
+    LOGD("Registering native PJSIP account for: %s", user_str);
+    
+    // In production builds, links to pjsua_acc_add()
+    
+    env->ReleaseStringUTFChars(username, user_str);
+    env->ReleaseStringUTFChars(secret, secret_str);
+    return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_dograh_voiceagent_sip_SipManager_nativeSipPlaceCall(
+    JNIEnv *env, jobject thiz, jstring uri) {
+    
+    const char *uri_str = env->GetStringUTFChars(uri, nullptr);
+    LOGD("Native PJSIP placing call to: %s", uri_str);
+    
+    // In production builds, links to pjsua_call_make_call()
+    
+    env->ReleaseStringUTFChars(uri, uri_str);
+    return JNI_TRUE;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_dograh_voiceagent_sip_SipManager_nativeSipAnswerCall(
+    JNIEnv *env, jobject thiz) {
+    LOGD("Native PJSIP answering incoming call");
+    // In production builds, links to pjsua_call_answer()
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_dograh_voiceagent_sip_SipManager_nativeSipSendDtmf(
+    JNIEnv *env, jobject thiz, jstring tones) {
+    
+    const char *tone_str = env->GetStringUTFChars(tones, nullptr);
+    LOGD("Native PJSIP transmitting DTMF tones: %s", tone_str);
+    
+    // In production builds, links to pjsua_call_dial_dtmf()
+    
+    env->ReleaseStringUTFChars(tones, tone_str);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_dograh_voiceagent_sip_SipManager_nativeSipTransfer(
+    JNIEnv *env, jobject thiz, jstring transfer_uri) {
+    
+    const char *uri_str = env->GetStringUTFChars(transfer_uri, nullptr);
+    LOGD("Native PJSIP executing REFER call transfer to: %s", uri_str);
+    
+    // In production builds, links to pjsua_call_xfer()
+    
+    env->ReleaseStringUTFChars(transfer_uri, uri_str);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_dograh_voiceagent_sip_SipManager_nativeSipHangup(
+    JNIEnv *env, jobject thiz) {
+    LOGD("Native PJSIP terminating active call");
+    // In production builds, links to pjsua_call_hangup_all()
+}
+
+

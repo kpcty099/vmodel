@@ -12,8 +12,11 @@ import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.NoiseSuppressor
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.dograh.voiceagent.asr.WhisperEngine
@@ -41,6 +44,7 @@ class AgentService : Service() {
     private lateinit var vadEngine: VadEngine
     private lateinit var callStateMachine: CallStateMachine
     private lateinit var promptRouter: PromptRouter
+    private var callWakeLock: PowerManager.WakeLock? = null
 
     private var isRunning = false
     private var currentCallActive = false
@@ -86,6 +90,7 @@ class AgentService : Service() {
 
         initAudioTrack()
         setupVadCallbacks()
+        setupSipCallbacks()
 
         // Load models asynchronously in service scope
         serviceScope.launch {
@@ -124,6 +129,9 @@ class AgentService : Service() {
         if (isRunning) return
         isRunning = true
         Log.d(TAG, "Autonomous Agent Loop started.")
+        // Prepare local simulated media stack or PJSIP endpoints
+        sipManager.initializeStack()
+        sipManager.register("exotel_did_user", "exotel_password") // standard registration parameters
         startAudioCapture()
     }
 
@@ -159,28 +167,76 @@ class AgentService : Service() {
         beepJob = null
     }
 
+    private fun setupSipCallbacks() {
+        sipManager.setListener(object : SipManager.SipListener {
+            override fun onCallRinging() {
+                Log.d(TAG, "SIP Telephony Channel: Outbound Ringing...")
+            }
+
+            override fun onCallConnected() {
+                Log.d(TAG, "SIP Telephony Channel: Connected! Initializing conversation flow.")
+                startBeepTimer()
+
+                // Present audible recording notification consent on connection
+                val consentWarning = "Namaste. Yeh call ek automatic voice agent dwara record ki ja rahi hai. Kya hum aage baat kar sakte hain? This call is being recorded by an automated voice assistant. Do you consent to proceed?"
+                speak(consentWarning)
+                transcriptBuilder.append("Agent: ").append(consentWarning).append("\n")
+
+                // Explicitly force state machine into Consent tracking mode
+                callStateMachine.forceTransition(CallState.CONSENT)
+            }
+
+            override fun onCallDisconnected() {
+                Log.d(TAG, "SIP Telephony Channel: Disconnected.")
+                currentCallActive = false
+                stopBeepTimer()
+                stopSpeaking()
+                releaseCallWakeLock()
+
+                // Post-call summary and storage in vector memory
+                serviceScope.launch {
+                    val transcript = transcriptBuilder.toString()
+                    if (transcript.isNotBlank()) {
+                        val prompt = """
+                            You are a post-call analyst. Read the transcript and generate a brief summary of the conversation.
+                            Transcript:
+                            $transcript
+                        """.trimIndent()
+
+                        val summary = llamaEngine.generate(prompt)
+                        Log.d(TAG, "Post-call summary generated: $summary")
+
+                        val mockEmbedding = FloatArray(384) { 0.1f }
+                        callMemory.saveCallRecord(currentPhoneNumber, "outbound", transcript, summary, mockEmbedding)
+                    }
+                }
+            }
+
+            override fun onIncomingCall(callerNumber: String) {
+                Log.d(TAG, "Incoming PSTN/SIP Call from $callerNumber. Triggering automatic VoIP answer...")
+                currentPhoneNumber = callerNumber
+                currentCallActive = true
+                transcriptBuilder.clear()
+                callStateMachine.reset()
+                acquireCallWakeLock()
+                sipManager.answerCall()
+            }
+        })
+    }
+
     private fun placeCall(phoneNumber: String) {
         if (currentCallActive) return
         currentCallActive = true
         currentPhoneNumber = phoneNumber
         transcriptBuilder.clear()
         callStateMachine.reset()
+        acquireCallWakeLock()
         
         serviceScope.launch {
             Log.d(TAG, "Placing autonomous outbound call to $phoneNumber...")
+            sipManager.initializeStack()
+            sipManager.register("exotel_did_user", "exotel_password") // Telecom provider registration pass
             sipManager.placeCall(phoneNumber)
-            
-            // Start compliance recording notifier beep tone
-            startBeepTimer()
-
-            // Present audible recording notification consent on connection
-            delay(1000) // Mock wait for connection
-            val consentWarning = "Namaste. Yeh call ek automatic voice agent dwara record ki ja rahi hai. Kya hum aage baat kar sakte hain? This call is being recorded by an automated voice assistant. Do you consent to proceed?"
-            speak(consentWarning)
-            transcriptBuilder.append("Agent: ").append(consentWarning).append("\n")
-            
-            // Explicitly force state machine into Consent tracking mode
-            callStateMachine.forceTransition(CallState.CONSENT)
         }
     }
 
@@ -191,25 +247,7 @@ class AgentService : Service() {
         stopSpeaking()
         Log.d(TAG, "Hanging up call...")
         sipManager.hangup()
-
-        // Post-call summary and storage in vector memory
-        serviceScope.launch {
-            val transcript = transcriptBuilder.toString()
-            if (transcript.isNotBlank()) {
-                val prompt = """
-                    You are a post-call analyst. Read the transcript and generate a brief summary of the conversation.
-                    Transcript:
-                    $transcript
-                """.trimIndent()
-                
-                val summary = llamaEngine.generate(prompt)
-                Log.d(TAG, "Post-call summary generated: $summary")
-
-                // Create a mock embedding for vector store (in real case, we use a SentenceTransformer model)
-                val mockEmbedding = FloatArray(384) { 0.1f } 
-                callMemory.saveCallRecord(currentPhoneNumber, "outbound", transcript, summary, mockEmbedding)
-            }
-        }
+        releaseCallWakeLock()
     }
 
     // ==========================================
@@ -303,43 +341,75 @@ class AgentService : Service() {
             )
 
             val audioRecord = AudioRecord(
-                MediaRecorder.AudioSource.MIC,
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
                 sampleRate,
                 channelConfig,
                 audioFormat,
                 bufferSize
             )
+            var acousticEchoCanceler: AcousticEchoCanceler? = null
+            var noiseSuppressor: NoiseSuppressor? = null
 
             if (audioRecord.state != AudioRecord.STATE_INITIALIZED) {
                 Log.e(TAG, "Failed to initialize AudioRecord for agent service")
+                audioRecord.release()
                 isAudioRecording = false
                 return@launch
             }
 
-            audioRecord.startRecording()
-            val audioFrame = ShortArray(frameSize)
-            Log.d(TAG, "Microphone capture loop initialized.")
+            try {
+                val audioSessionId = audioRecord.audioSessionId
+                if (AcousticEchoCanceler.isAvailable()) {
+                    acousticEchoCanceler = AcousticEchoCanceler.create(audioSessionId)?.apply {
+                        enabled = true
+                    }
+                    Log.d(TAG, "AcousticEchoCanceler ${if (acousticEchoCanceler != null) "enabled" else "unavailable"} for session $audioSessionId")
+                } else {
+                    Log.w(TAG, "AcousticEchoCanceler is not available on this device")
+                }
 
-            while (isActive && isAudioRecording) {
-                val readSamples = audioRecord.read(audioFrame, 0, frameSize)
-                if (readSamples > 0) {
-                    val actualFrame = ShortArray(readSamples)
-                    System.arraycopy(audioFrame, 0, actualFrame, 0, readSamples)
+                if (NoiseSuppressor.isAvailable()) {
+                    noiseSuppressor = NoiseSuppressor.create(audioSessionId)?.apply {
+                        enabled = true
+                    }
+                    Log.d(TAG, "NoiseSuppressor ${if (noiseSuppressor != null) "enabled" else "unavailable"} for session $audioSessionId")
+                } else {
+                    Log.w(TAG, "NoiseSuppressor is not available on this device")
+                }
 
-                    // Process through VAD Engine
-                    val speechActive = vadEngine.processFrame(actualFrame)
-                    
-                    if (speechActive) {
-                        synchronized(accumulatedAudio) {
-                            accumulatedAudio.addAll(actualFrame.toList())
+                audioRecord.startRecording()
+                val audioFrame = ShortArray(frameSize)
+                Log.d(TAG, "Voice communication microphone capture loop initialized.")
+
+                while (isActive && isAudioRecording) {
+                    val readSamples = audioRecord.read(audioFrame, 0, frameSize)
+                    if (readSamples > 0) {
+                        val actualFrame = ShortArray(readSamples)
+                        System.arraycopy(audioFrame, 0, actualFrame, 0, readSamples)
+
+                        // Process through VAD Engine
+                        val speechActive = vadEngine.processFrame(actualFrame)
+
+                        if (speechActive) {
+                            synchronized(accumulatedAudio) {
+                                accumulatedAudio.addAll(actualFrame.toList())
+                            }
                         }
                     }
                 }
+            } finally {
+                try {
+                    if (audioRecord.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                        audioRecord.stop()
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error stopping AudioRecord: ${e.message}")
+                }
+                acousticEchoCanceler?.release()
+                noiseSuppressor?.release()
+                audioRecord.release()
+                Log.d(TAG, "Microphone capture loop terminated.")
             }
-
-            audioRecord.stop()
-            audioRecord.release()
-            Log.d(TAG, "Microphone capture loop terminated.")
         }
     }
 
@@ -457,7 +527,7 @@ class AgentService : Service() {
                     }
                     "dtmf" -> {
                         val tones = json.optString("dtmf_tones", "")
-                        sipManager.register(tones, "") // Transmit DTMF
+                        sipManager.sendDtmf(tones) // Transmit DTMF
                     }
                 }
             } catch (e: Exception) {
@@ -479,7 +549,7 @@ class AgentService : Service() {
             delay(4000)
             
             // Execute actual SIP transfer protocol
-            sipManager.register("transfer_trunk_india", "exotel_route")
+            sipManager.transferCall("sip:transfer_trunk_india@exotel_route")
             
             // Handover state machine to terminate local loop
             callStateMachine.forceTransition(CallState.HANGUP)
@@ -507,6 +577,7 @@ class AgentService : Service() {
         Log.d(TAG, "AgentService onDestroy called")
         stopAudioCapture()
         stopSpeaking()
+        releaseCallWakeLock()
         
         serviceJob.cancel()
         whisperEngine.release()
@@ -542,6 +613,29 @@ class AgentService : Service() {
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_menu_call)
             .build()
+    }
+
+    private fun acquireCallWakeLock() {
+        if (callWakeLock?.isHeld == true) return
+
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        callWakeLock = powerManager.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK,
+            "$packageName:AgentServiceCall"
+        ).apply {
+            setReferenceCounted(false)
+            acquire()
+        }
+        Log.d(TAG, "Call wake lock acquired")
+    }
+
+    private fun releaseCallWakeLock() {
+        val wakeLock = callWakeLock
+        if (wakeLock?.isHeld == true) {
+            wakeLock.release()
+            Log.d(TAG, "Call wake lock released")
+        }
+        callWakeLock = null
     }
 
     companion object {
