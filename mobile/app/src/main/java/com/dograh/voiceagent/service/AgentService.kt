@@ -45,6 +45,7 @@ class AgentService : Service() {
     private lateinit var callStateMachine: CallStateMachine
     private lateinit var promptRouter: PromptRouter
     private var callWakeLock: PowerManager.WakeLock? = null
+    private var incomingWakeReleaseJob: Job? = null
 
     private var isRunning = false
     private var currentCallActive = false
@@ -120,6 +121,13 @@ class AgentService : Service() {
                 val num = intent.getStringExtra(EXTRA_PHONE_NUMBER) ?: currentPhoneNumber
                 placeCall(num)
             }
+            ACTION_PREPARE_INCOMING_CALL -> {
+                val callId = intent.getStringExtra(EXTRA_CALL_ID)
+                val callerNumber = intent.getStringExtra(EXTRA_CALLER_NUMBER) ?: currentPhoneNumber
+                prepareIncomingCall(callId, callerNumber)
+            }
+            ACTION_ACCEPT_INCOMING_CALL -> acceptIncomingCall()
+            ACTION_DECLINE_INCOMING_CALL -> declineIncomingCall()
             ACTION_HANGUP_CALL -> hangupCall()
         }
         return START_STICKY
@@ -191,6 +199,8 @@ class AgentService : Service() {
                 currentCallActive = false
                 stopBeepTimer()
                 stopSpeaking()
+                incomingWakeReleaseJob?.cancel()
+                incomingWakeReleaseJob = null
                 releaseCallWakeLock()
 
                 // Post-call summary and storage in vector memory
@@ -238,6 +248,41 @@ class AgentService : Service() {
             sipManager.register("exotel_did_user", "exotel_password") // Telecom provider registration pass
             sipManager.placeCall(phoneNumber)
         }
+    }
+
+    private fun prepareIncomingCall(callId: String?, callerNumber: String) {
+        if (currentCallActive) return
+        currentPhoneNumber = callerNumber
+        transcriptBuilder.clear()
+        callStateMachine.reset()
+        acquireCallWakeLock()
+        scheduleIncomingWakeLockTimeout()
+
+        serviceScope.launch {
+            Log.d(TAG, "Preparing incoming VoIP call wakeup. callId=$callId caller=$callerNumber")
+            sipManager.initializeStack()
+            sipManager.register("exotel_did_user", "exotel_password")
+        }
+    }
+
+    private fun acceptIncomingCall() {
+        if (currentCallActive) return
+        currentCallActive = true
+        Log.d(TAG, "Accepting incoming VoIP call from $currentPhoneNumber")
+        incomingWakeReleaseJob?.cancel()
+        incomingWakeReleaseJob = null
+        acquireCallWakeLock()
+        startAudioCapture()
+        sipManager.answerCall()
+    }
+
+    private fun declineIncomingCall() {
+        Log.d(TAG, "Declining incoming VoIP call from $currentPhoneNumber")
+        currentCallActive = false
+        incomingWakeReleaseJob?.cancel()
+        incomingWakeReleaseJob = null
+        sipManager.hangup()
+        releaseCallWakeLock()
     }
 
     private fun hangupCall() {
@@ -577,6 +622,8 @@ class AgentService : Service() {
         Log.d(TAG, "AgentService onDestroy called")
         stopAudioCapture()
         stopSpeaking()
+        incomingWakeReleaseJob?.cancel()
+        incomingWakeReleaseJob = null
         releaseCallWakeLock()
         
         serviceJob.cancel()
@@ -638,16 +685,33 @@ class AgentService : Service() {
         callWakeLock = null
     }
 
+    private fun scheduleIncomingWakeLockTimeout() {
+        incomingWakeReleaseJob?.cancel()
+        incomingWakeReleaseJob = serviceScope.launch {
+            delay(INCOMING_CALL_WAKE_LOCK_TIMEOUT_MS)
+            if (!currentCallActive) {
+                Log.d(TAG, "Incoming call was not answered; releasing pending wake lock")
+                releaseCallWakeLock()
+            }
+        }
+    }
+
     companion object {
         private const val TAG = "AgentService"
         private const val NOTIFICATION_ID = 1001
         private const val CHANNEL_ID = "DograhAgentChannel"
+        private const val INCOMING_CALL_WAKE_LOCK_TIMEOUT_MS = 60_000L
 
         const val ACTION_START_AGENT = "com.dograh.voiceagent.ACTION_START_AGENT"
         const val ACTION_STOP_AGENT = "com.dograh.voiceagent.ACTION_STOP_AGENT"
         const val ACTION_PLACE_CALL = "com.dograh.voiceagent.ACTION_PLACE_CALL"
+        const val ACTION_PREPARE_INCOMING_CALL = "com.dograh.voiceagent.ACTION_PREPARE_INCOMING_CALL"
+        const val ACTION_ACCEPT_INCOMING_CALL = "com.dograh.voiceagent.ACTION_ACCEPT_INCOMING_CALL"
+        const val ACTION_DECLINE_INCOMING_CALL = "com.dograh.voiceagent.ACTION_DECLINE_INCOMING_CALL"
         const val ACTION_HANGUP_CALL = "com.dograh.voiceagent.ACTION_HANGUP_CALL"
 
         const val EXTRA_PHONE_NUMBER = "com.dograh.voiceagent.EXTRA_PHONE_NUMBER"
+        const val EXTRA_CALL_ID = "com.dograh.voiceagent.EXTRA_CALL_ID"
+        const val EXTRA_CALLER_NUMBER = "com.dograh.voiceagent.EXTRA_CALLER_NUMBER"
     }
 }
